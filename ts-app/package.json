@@ -1,0 +1,27 @@
+{
+  "name": "kafka-mysql-streamer",
+  "version": "1.0.0",
+  "description": "Kafka Producer reads NDJSON file and Consumer writes to MySQL.",
+  "main": "producer.js",
+  "scripts": {
+    "build": "tsc",
+    "start:producer": "ts-node producer.ts",
+    "start:consumer": "ts-node consumer.ts"
+  },
+  "keywords": [
+    "kafka",
+    "typescript",
+    "mysql"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "kafkajs": "^2.2.4",
+    "mysql2": "^3.9.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
