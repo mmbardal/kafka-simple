@@ -1,0 +1,15 @@
+. فیلتر کردن بر اساس یک بازه زمانی (Time Window Query)
+MATCH (s:Entity)-[r]->(t:Entity)
+WHERE r.startTime <=1761396000000
+  AND ( r.endTime >=1761395000000)
+RETURN s, r, t
+limit 10
+
+
+
+
+// تمام روابطی را پیدا کن که 'endTime' ندارند.
+MATCH (s:Entity)-[r]->(t:Entity)
+WHERE r.endTime IS NULL
+RETURN s, r, t
+LIMIT 10
