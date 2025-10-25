@@ -1,6 +1,6 @@
 # Common Ignored Files
-/node_modules
-/dist
+ts-app/node_modules
+ts-app/dist
 
 .DS_Store
 .vscode
