@@ -2,14 +2,13 @@ import { Kafka, EachBatchPayload, Consumer } from 'kafkajs';
 import neo4j, { Driver, Session, Transaction } from 'neo4j-driver';
 
 // --- Configuration ---
-// FIX: Changed 'localhost:094' to 'localhost:9094' to match Kafka broker configuration
 const KAFKA_BROKERS = ['localhost:9092', 'localhost:9094', 'localhost:9096'];
 const TOPIC_NAME = 'events-topic';
 
 // --- تنظیمات تکرار (برای شروع مجدد خواندن) ---
 // هر بار که می‌خواهید خواندن از کافکا را از صفر شروع کنید، این عدد را افزایش دهید.
-const GROUP_RUN_NUMBER = 2; // شماره فعلی گروه
-const GROUP_ID = `neo4j-graph-builder-group`//-${GROUP_RUN_NUMBER}`;
+const GROUP_RUN_NUMBER = 2; // Increased to 9 after fixing the Neo4j syntax error in closureQuery
+const GROUP_ID = `neo4j-graph-builder-group-${GROUP_RUN_NUMBER}`;
 
 // Neo4j Connection Details (Matches docker-compose.yml)
 const NEO4J_URI = 'bolt://localhost:7687';
@@ -28,13 +27,14 @@ const consumer: Consumer = kafka.consumer({ groupId: GROUP_ID });
 // Create Neo4j Driver
 let driver: Driver;
 
-// Interface for our event data (based on your events.ndjson)
+// Interface for our event data (without mandatory timestamp)
 interface EventData {
   id: string;
   type: string;
   sourceId: string;
   targetId: string;
   clientId: string;
+  timestamp?: number; // Optional, as we generate it here
 }
 
 /**
@@ -56,10 +56,10 @@ function sanitizeRelationshipType(type: string): string | null {
 }
 
 /**
- * Processes a single event and adds it to the Neo4j transaction.
- * This models the network communication tree as requested.
+ * Processes a single event and models its lifecycle using startTime and endTime.
+ * This is the core logic for temporal modeling.
  */
-async function processMessage(tx: Transaction, data: EventData): Promise<void> {
+async function processMessage(tx: Transaction, data: EventData, currentTimestamp: number): Promise<void> {
   const relationshipType = sanitizeRelationshipType(data.type);
 
   if (!relationshipType) {
@@ -67,33 +67,53 @@ async function processMessage(tx: Transaction, data: EventData): Promise<void> {
     return;
   }
 
-  // This Cypher query builds the graph:
-  // 1. MERGE ensures nodes (Client, Source, Target) are created only if they don't exist.
-  // 2. MERGE creates the relationships between them.
-  // 3. We dynamically set the relationship type (e.g., :PROCESS_CREATE) based on the message.
-  const query = `
+  // Common Cypher block: Ensure nodes and permanent HOSTS relationships exist
+  const baseQuery = `
     MERGE (c:Client {id: $clientId})
     MERGE (source:Entity {id: $sourceId})
-    MERGE (target:Entity {id: $targetId})
-    
-    // Link entities to the client that hosts them
+    ${data.targetId && data.targetId.trim() !== '' ? 'MERGE (target:Entity {id: $targetId})' : ''}
     MERGE (c)-[:HOSTS]->(source)
-    MERGE (c)-[:HOSTS]->(target)
-    
-    // Create the dynamic relationship based on the event type
-    // We also store the event ID on the relationship
-    // Note: We must build the string for the relationship type.
-    MERGE (source)-[r:${relationshipType} {eventId: $id}]->(target)
+    ${data.targetId && data.targetId.trim() !== '' ? 'MERGE (c)-[:HOSTS]->(target)' : ''}
   `;
+  const params = { ...data, currentTimestamp }; 
 
-  await tx.run(query, data);
+  if (data.type === 'processterminate') {
+  const closureQuery = `
+    ${baseQuery}
+    WITH source, $currentTimestamp AS endTime
+    MATCH (source)-[r]->()
+    WHERE r.endTime IS NULL
+    SET r.endTime = endTime
+    SET source.status = 'TERMINATED'
+    RETURN count(r) AS closedRelationships
+  `;
+  const result = await tx.run(closureQuery, params);
+  const count = result.records[0].get('closedRelationships');
+  //console.log(`[CONSUMER] Terminated process ${data.sourceId}. Closed ${count} active relationships.`);
+}else if (data.targetId && data.targetId.trim() !== '') {
+    // --- START LOGIC: Create a new relationship with startTime ---
+    const startQuery = `
+      ${baseQuery}
+      // NOTE: The previous WITH clause was removed to fix the Cypher syntax error.
+      // 'source', 'target', and all parameters ($id, $currentTimestamp, $clientId) 
+      // are available in the scope of the CREATE statement.
+      // Create a new relationship with a startTime property using Processing Time.
+      CREATE (source)-[r:${relationshipType} {
+        eventId: $id,
+        startTime: $currentTimestamp, // Use Processing Time for start
+        clientId: $clientId
+      }]->(target)
+      SET source.status = 'ACTIVE' 
+    `;
+    await tx.run(startQuery, params);
+  } else {
+      // NOTE: Removed console.warn for skipping non-closure events with no targetId, as requested.
+  }
 }
 
 /**
  * Handles the processing of each batch of messages received from Kafka.
  */
-// FIX: Removed 'consumer' from EachBatchPayload destructuring, as it's not part of the payload.
-// The global 'consumer' object is used instead (on line 136).
 const eachBatch = async ({ batch, heartbeat }: EachBatchPayload) => {
   const session: Session = driver.session({ database: 'neo4j' });
   const tx: Transaction = session.beginTransaction();
@@ -108,31 +128,25 @@ const eachBatch = async ({ batch, heartbeat }: EachBatchPayload) => {
       try {
         data = JSON.parse(message.value.toString());
         
-        // --- UPDATED VALIDATION LOGIC ---
-        // 1. Check for critical fields (ID, Type, Client, Source)
+        // --- VALIDATION: Check for mandatory fields ---
         if (!data.id || !data.type || !data.clientId || !data.sourceId) {
             console.warn(`[CONSUMER] Skipping malformed message (missing critical fields): ${message.value.toString()}`);
             continue;
         }
 
-        // 2. Check for TargetId: This field is REQUIRED for building the communication tree (relationship).
-        // If TargetId is missing or empty, we cannot build a relationship, so we skip it.
-        if (!data.targetId || data.targetId.trim() === "") {
-            // This intentionally skips 'processterminate' events, as they have no target.
-            // We use 'warn' instead of 'error' because it's an expected data pattern for termination events.
-            console.warn(`[CONSUMER] Skipping message of type '${data.type}' (no targetId for relationship): ${message.value.toString()}`);
-            continue;
-        }
-        // --- END UPDATED VALIDATION LOGIC ---
-
-
       } catch (parseError) {
         console.error(`[CONSUMER] Failed to parse JSON, skipping message at offset ${message.offset}: ${message.value.toString()}`, parseError);
         continue; // Skip this message
       }
+      
+      // 1. Capture the current system time (substituting for missing event timestamp)
+      const currentTimestamp = Date.now(); 
 
-      // Process the valid message
-      await processMessage(tx, data);
+      // 2. Process the message with the generated timestamp
+      await processMessage(tx, data, currentTimestamp);
+      
+      // 3. APPLY 1ms DELAY as requested to simulate time progression between events
+      await new Promise(resolve => setTimeout(resolve, 1));
     }
 
     // If all messages in the batch are processed, commit the Neo4j transaction
@@ -141,7 +155,6 @@ const eachBatch = async ({ batch, heartbeat }: EachBatchPayload) => {
 
     // Manually commit the final offset of the batch to Kafka
     const lastOffset = String(Number(batch.lastOffset()) + 1);
-    // Uses the 'consumer' constant defined in  the global scope
     await consumer.commitOffsets([{ 
       topic: batch.topic, 
       partition: Number(batch.partition), 
@@ -180,7 +193,7 @@ async function runConsumer() {
     await consumer.subscribe({ topic: TOPIC_NAME, fromBeginning: true });
     
     // 4. Start Consuming
-    console.log(`[CONSUMER] Subscribed to topic ${TOPIC_NAME}. Starting to consume.`);
+    console.log(`[CONSUMER] Subscribed to topic ${TOPIC_NAME}. Starting to consume. Group ID: ${GROUP_ID}`);
     await consumer.run({
       eachBatch: eachBatch,
       autoCommit: false, // We commit offsets manually after successful Neo4j transaction

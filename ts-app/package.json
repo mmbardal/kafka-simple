@@ -1,23 +1,25 @@
 {
-  "name": "kafka-mysql-streamer",
+  "name": "kafka-neo4j-streamer",
   "version": "1.0.0",
-  "description": "Kafka Producer reads NDJSON file and Consumer writes to MySQL.",
-  "main": "producer.js",
+  "description": "Kafka Producer reads NDJSON, Consumer writes to Neo4j graph.",
+  "main": "dist/consumer.js",
   "scripts": {
     "build": "tsc",
     "start:producer": "ts-node producer.ts",
-    "start:consumer": "ts-node consumer.ts"
+    "start:consumer": "ts-node consumer.ts",
+    "start:consumerx": "ts-node consumerx.ts"
   },
   "keywords": [
     "kafka",
     "typescript",
-    "mysql"
+    "neo4j",
+    "graph"
   ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "kafkajs": "^2.2.4",
-    "mysql2": "^3.9.7"
+    "neo4j-driver": "^5.21.0"
   },
   "devDependencies": {
     "@types/node": "^20.12.12",
@@ -25,3 +27,4 @@
     "typescript": "^5.4.5"
   }
 }
+
